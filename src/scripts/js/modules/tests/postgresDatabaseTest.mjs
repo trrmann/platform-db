@@ -366,6 +366,41 @@ export class PostgresDatabaseTest extends LocalDatabaseTest {
     return PostgresDatabase.sleep(ms);
   }
 
+  checkQueryLog() {
+    console.log('\nQuery log');
+    const settings = PostgresDatabase.queryLogSettings;
+    this.check('production defaults to slow', settings({ NODE_ENV: 'production' }).mode === 'slow');
+    this.check('on Render defaults to slow', settings({ RENDER: 'true' }).mode === 'slow');
+    this.check('elsewhere defaults to all', settings({}).mode === 'all');
+    this.check(
+      'DB_PG_LOG_QUERIES overrides; an unknown value falls back',
+      settings({ NODE_ENV: 'production', DB_PG_LOG_QUERIES: 'all' }).mode === 'all' &&
+        settings({ DB_PG_LOG_QUERIES: 'OFF' }).mode === 'off' &&
+        settings({ DB_PG_LOG_QUERIES: 'loud' }).mode === 'all'
+    );
+    this.check(
+      'slow threshold: default 500 ms, DB_PG_SLOW_QUERY_MS overrides',
+      settings({}).slowMs === 500 && settings({ DB_PG_SLOW_QUERY_MS: '50' }).slowMs === 50
+    );
+    const lines = [];
+    const original = console.log;
+    console.log = (...args) => lines.push(args[0]);
+    try {
+      const probe = { queryLog: { mode: 'slow', slowMs: 100 } };
+      PostgresDatabase.prototype.logQuery.call(probe, 'SELECT 1', 5, 1);
+      PostgresDatabase.prototype.logQuery.call(probe, 'SELECT pg_sleep(1)', 1000, 1);
+      probe.queryLog = { mode: 'off', slowMs: 0 };
+      PostgresDatabase.prototype.logQuery.call(probe, 'SELECT 1', 5000, 1);
+    } finally {
+      console.log = original;
+    }
+    this.check(
+      'slow mode logs only slow queries; off logs nothing',
+      lines.length === 1 && lines[0] === 'Slow query',
+      lines.join(',')
+    );
+  }
+
   async run() {
     this.assertLocalTarget();
     console.log('PostgresDatabase test (local scratch database)\n');
@@ -378,6 +413,7 @@ export class PostgresDatabaseTest extends LocalDatabaseTest {
     await this.checkBootstrapLock();
     await this.checkReadOnly();
     this.checkTargetGuard();
+    this.checkQueryLog();
     await this.resetDatabase();
     return this.summary();
   }

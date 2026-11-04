@@ -301,8 +301,43 @@ export class PostgresDatabase {
     return statements;
   }
 
+  /** Query log modes (DB_PG_LOG_QUERIES). */
+  static QUERY_LOG_MODES = ['all', 'slow', 'off'];
+  static DEFAULT_SLOW_QUERY_MS = 500;
+
+  /**
+   * How queries are logged: DB_PG_LOG_QUERIES = all | slow | off. Default: `slow` in production
+   * (NODE_ENV=production or on Render), where every health check would otherwise add a line,
+   * and `all` elsewhere. `slow` logs queries taking at least DB_PG_SLOW_QUERY_MS (default 500).
+   * Parameters are never logged.
+   * @returns {{mode: string, slowMs: number}}
+   */
+  static queryLogSettings(env = process.env) {
+    const production = env.NODE_ENV === 'production' || Boolean(env.RENDER);
+    const requested = String(env.DB_PG_LOG_QUERIES || '').toLowerCase();
+    const mode = PostgresDatabase.QUERY_LOG_MODES.includes(requested)
+      ? requested
+      : production
+        ? 'slow'
+        : 'all';
+    const slowMs = Number.parseInt(env.DB_PG_SLOW_QUERY_MS, 10);
+    return {
+      mode,
+      slowMs:
+        Number.isFinite(slowMs) && slowMs >= 0 ? slowMs : PostgresDatabase.DEFAULT_SLOW_QUERY_MS,
+    };
+  }
+
+  /** Log one executed query according to the adapter's query log settings. */
+  logQuery(text, duration, rows) {
+    const { mode, slowMs } = this.queryLog;
+    if (mode === 'off' || (mode === 'slow' && duration < slowMs)) return;
+    console.log(mode === 'slow' ? 'Slow query' : 'Executed query', { text, duration, rows });
+  }
+
   constructor(config = {}) {
     this.constructor.initializeEnvironment();
+    this.queryLog = this.constructor.queryLogSettings(process.env);
 
     const resolvedConfig = this.constructor.createConfig(config);
 
@@ -641,7 +676,7 @@ export class PostgresDatabase {
     try {
       const result = await this.pool.query(text, params);
       const duration = Date.now() - start;
-      console.log('Executed query', { text, duration, rows: result.rowCount });
+      this.logQuery(text, duration, result.rowCount);
       return result;
     } catch (error) {
       console.error('Database query error:', error.message);

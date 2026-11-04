@@ -12,6 +12,10 @@
 
 ## resolved
 
+- **Quieter query log in production (v0.2.3, 2026-11-04).** Every query was logged (`Executed query …`), so in
+  production Render's health checks alone added a line every few seconds. `DB_PG_LOG_QUERIES` = `all` | `slow` | `off`;
+  the default is `slow` in production (or on Render) and `all` elsewhere; `slow` logs queries taking at least
+  `DB_PG_SLOW_QUERY_MS` (default 500) as `Slow query`. **Resolved:** `npm test` 56/56 (6 new checks) and 21/21.
 - **Local app user mirrors Render's admin login (v0.2.2, 2026-11-04).** `CREATEROLE` (not superuser), set at `init`
   and on `start` for existing clusters, so iam-service's `iam-provision` (per-app logins) is tested locally under the
   same rights it has on Render (checked there: `app_admin` can create roles, is not a superuser). **Resolved:**

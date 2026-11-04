@@ -53,14 +53,15 @@ a database that isn't there yet or drops out:
 Every `query()` and `withTransaction()` runs through the adapter's `QueryScheduler` (memory only, since it waits for
 the database). Schema bootstrap and `waitForConnection()` bypass it.
 
-| Setting                                      | Default                                                 | Meaning                                                                              |
-| -------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| Concurrency                                  | the pool size (`DB_PG_POOL_MAX`, default 20)            | at most this many queries or transactions at once                                    |
-| `DB_PG_RATE_PER_SECOND` / `DB_PG_RATE_BURST` | off                                                     | optional rate limit (token bucket)                                                   |
-| Classes                                      | `critical` 5 s, `interactive` 30 s, `background` 10 min | priority order and the longest a job may wait (queue + retries)                      |
-| Ageing                                       | 5 s                                                     | a waiting job gains one priority step every 5 s, so background work is never starved |
-| `DB_PG_QUERY_RULES`                          | none                                                    | JSON file `{ "default": "interactive", "queries": { "backup_*": "background" } }`    |
-| `DB_PG_SCHEDULER=off`                        | on                                                      | bypass the scheduler (escape hatch)                                                  |
+| Setting                                      | Default                                                 | Meaning                                                                                                 |
+| -------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Concurrency                                  | the pool size (`DB_PG_POOL_MAX`, default 20)            | at most this many queries or transactions at once                                                       |
+| `DB_PG_RATE_PER_SECOND` / `DB_PG_RATE_BURST` | off                                                     | optional rate limit (token bucket)                                                                      |
+| Classes                                      | `critical` 5 s, `interactive` 30 s, `background` 10 min | priority order and the longest a job may wait (queue + retries)                                         |
+| Ageing                                       | 5 s                                                     | a waiting job gains one priority step every 5 s, so background work is never starved                    |
+| `DB_PG_QUERY_RULES`                          | none                                                    | JSON file `{ "default": "interactive", "queries": { "backup_*": "background" } }`                       |
+| `DB_PG_SCHEDULER=off`                        | on                                                      | bypass the scheduler (escape hatch)                                                                     |
+| `DB_PG_LOG_QUERIES`                          | `slow` in production (or on Render), else `all`         | `all`, `slow` (only queries ≥ `DB_PG_SLOW_QUERY_MS`, default 500) or `off`; parameters are never logged |
 
 - **Rules** map named queries (from `-- Query: name` sections) to classes. Precedence: this package's
   (`health_check`, `connection_probe`, `table_exists` are `critical`), then the adapter's `static QUERY_RULES`, then the
