@@ -3,13 +3,15 @@
 Shared PostgreSQL layer for the platform's applications (iam-service, FlashCards, request-queue, …).
 It is a **library**, not a service: each application uses it in-process against the shared database.
 
-| Export                     | Purpose                                                                                                                                                                                                                                      |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PostgresDatabase`         | Base adapter: pool, `static SCHEMA` (connection `search_path`), `static sqlRoot`, SQL file and named-query loading, `waitForConnection`, `initializeSchemaFromFile`, `withTransaction`, `tableExists`, `healthCheck`, `DB_PG_EXPIRE` warning |
-| `DatabaseUnavailableError` | Thrown by `waitForConnection()` when the database didn't answer within the wait limit (`attempts`, `waitedMs`, `cause`)                                                                                                                      |
-| `LocalDatabaseTest`        | Base class for tests on a local scratch database: local-only guard, checks, summary, pool cleanup                                                                                                                                            |
-| `DatabaseTargetGuard`      | `DatabaseTargetGuard.assert(env, config)`: a development or preview server may use only a local or read-only database (override `DB_PG_ALLOW_REMOTE_WRITES=true`). Call it before anything touches the database                              |
-| `TcpRelay`                 | Test tooling: forwards a local port to the scratch database. Start it late to simulate a database that comes up after the service; stop it to simulate an outage                                                                             |
+| Export                                    | Purpose                                                                                                                                                                                                                                      |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PostgresDatabase`                        | Base adapter: pool, `static SCHEMA` (connection `search_path`), `static sqlRoot`, SQL file and named-query loading, `waitForConnection`, `initializeSchemaFromFile`, `withTransaction`, `tableExists`, `healthCheck`, `DB_PG_EXPIRE` warning |
+| `DatabaseUnavailableError`                | Thrown by `waitForConnection()` when the database didn't answer within the wait limit (`attempts`, `waitedMs`, `cause`)                                                                                                                      |
+| `LocalDatabaseTest`                       | Base class for tests on a local scratch database: local-only guard, checks, summary, pool cleanup                                                                                                                                            |
+| `DatabaseTargetGuard`                     | `DatabaseTargetGuard.assert(env, config)`: a development or preview server may use only a local or read-only database (override `DB_PG_ALLOW_REMOTE_WRITES=true`). Call it before anything touches the database                              |
+| `QueryScheduler`, `QueryWaitTimeoutError` | Queues, throttles and prioritises database work (see "Queued database work")                                                                                                                                                                 |
+| `TokenBucket`                             | Rate limiter (burst + refill per second), shared with request-queue                                                                                                                                                                          |
+| `TcpRelay`                                | Test tooling: forwards a local port to the scratch database. Start it late to simulate a database that comes up after the service; stop it to simulate an outage                                                                             |
 
 ## Using it
 
@@ -45,6 +47,32 @@ a database that isn't there yet or drops out:
   and opens a new connection on the next query. The process keeps running. Earlier versions exited.
 - **Queries during an outage** fail with the driver's error. Queued, throttled and prioritised database work is
   planned (see [Issues.md](./Issues.md)).
+
+## Queued database work
+
+Every `query()` and `withTransaction()` runs through the adapter's `QueryScheduler` (memory only, since it waits for
+the database). Schema bootstrap and `waitForConnection()` bypass it.
+
+| Setting                                      | Default                                                 | Meaning                                                                              |
+| -------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Concurrency                                  | the pool size (`DB_PG_POOL_MAX`, default 20)            | at most this many queries or transactions at once                                    |
+| `DB_PG_RATE_PER_SECOND` / `DB_PG_RATE_BURST` | off                                                     | optional rate limit (token bucket)                                                   |
+| Classes                                      | `critical` 5 s, `interactive` 30 s, `background` 10 min | priority order and the longest a job may wait (queue + retries)                      |
+| Ageing                                       | 5 s                                                     | a waiting job gains one priority step every 5 s, so background work is never starved |
+| `DB_PG_QUERY_RULES`                          | none                                                    | JSON file `{ "default": "interactive", "queries": { "backup_*": "background" } }`    |
+| `DB_PG_SCHEDULER=off`                        | on                                                      | bypass the scheduler (escape hatch)                                                  |
+
+- **Rules** map named queries (from `-- Query: name` sections) to classes. Precedence: this package's
+  (`health_check`, `connection_probe`, `table_exists` are `critical`), then the adapter's `static QUERY_RULES`, then the
+  `DB_PG_QUERY_RULES` file. An exact name beats a wildcard, and a longer wildcard beats a shorter one. A call can
+  override: `db.query(sql, params, { priority: 'background' })`, `db.withTransaction(work, { priority })`.
+- **Retry:** temporary failures are retried with backoff (0.2 s doubling to 5 s) within the class's waiting limit:
+  connection refused or dropped, `57P01`/`57P02`/`57P03` restarts, `53300` too many connections, `08xxx`
+  connection errors, `40001`/`40P01` serialization and deadlock. Real errors (syntax, constraint) fail at once.
+- **Transactions are one job,** so a retry reruns the whole `work(client)`: it must be safe to run again. Inside it use
+  `client.query`. Calling the adapter's `query()` from inside takes a second slot.
+- A job still queued at its waiting limit fails with `QueryWaitTimeoutError` (`cause`: the last error). A running job
+  is never interrupted.
 
 ## Local scratch database
 

@@ -19,6 +19,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
 import dotenv from 'dotenv';
+import { QueryScheduler } from './queryScheduler.mjs';
+import { TokenBucket } from './tokenBucket.mjs';
 
 /**
  * The database did not answer within the wait limit of waitForConnection().
@@ -51,6 +53,20 @@ export class PostgresDatabase {
   static DEFAULT_CONNECT_WAIT_MS = 120000;
   static DEFAULT_RETRY_BASE_DELAY_MS = 500;
   static DEFAULT_RETRY_MAX_DELAY_MS = 10000;
+
+  /**
+   * Classes for the package's own queries; subclasses add theirs in `static QUERY_RULES`
+   * ({ default?, queries: { 'name_or_glob*': 'critical' | 'interactive' | 'background' } }), and
+   * DB_PG_QUERY_RULES may name a JSON file with the same shape (applied last).
+   */
+  static DEFAULT_QUERY_RULES = {
+    queries: { connection_probe: 'critical', health_check: 'critical', table_exists: 'critical' },
+  };
+
+  static QUERY_RULES = {};
+
+  /** SQL text → query name, filled by loadNamedSqlStatements (lets rules name queries). */
+  static queryNames = new Map();
 
   /** Advisory lock held while any schema file is bootstrapped (one at a time per database). */
   static BOOTSTRAP_LOCK_KEY = 'platform-db:schema-bootstrap';
@@ -104,7 +120,7 @@ export class PostgresDatabase {
       password: config.password ?? process.env.DB_PG_PASSWORD,
       // DB_PG_SSL=disable is for the local scratch cluster (local-db.sh); Render requires SSL.
       ssl: config.ssl ?? (process.env.DB_PG_SSL === 'disable' ? false : this.DEFAULT_SSL),
-      max: config.max ?? this.DEFAULT_POOL_MAX,
+      max: config.max ?? Number(process.env.DB_PG_POOL_MAX || this.DEFAULT_POOL_MAX),
       idleTimeoutMillis: config.idleTimeoutMillis ?? this.DEFAULT_IDLE_TIMEOUT_MS,
       connectionTimeoutMillis: config.connectionTimeoutMillis ?? this.DEFAULT_CONNECTION_TIMEOUT_MS,
       options: this.connectionOptions(config.options, readOnly),
@@ -139,6 +155,7 @@ export class PostgresDatabase {
       }
 
       named[name] = statements[0];
+      PostgresDatabase.queryNames.set(statements[0], name);
     }
 
     return named;
@@ -295,6 +312,58 @@ export class PostgresDatabase {
     // An idle connection can drop when the database restarts. The pool discards it and opens a
     // new one on the next query, so this is logged rather than ending the process.
     this.pool.on('error', (error) => this.onIdleClientError(error));
+    this.scheduler = this.constructor.createScheduler(this.config);
+  }
+
+  /**
+   * The QueryScheduler for an adapter: concurrency = pool size, optional rate limit
+   * (DB_PG_RATE_PER_SECOND, burst DB_PG_RATE_BURST), and the merged query rules.
+   * Returns null when disabled (`scheduler: false`, or DB_PG_SCHEDULER=off).
+   */
+  static createScheduler(config, env = process.env) {
+    if (config.scheduler === false || env.DB_PG_SCHEDULER === 'off') return null;
+    const rate = Number(env.DB_PG_RATE_PER_SECOND || 0);
+    return new QueryScheduler({
+      maxConcurrent: config.max,
+      rateLimiter:
+        rate > 0
+          ? new TokenBucket({
+              capacity: Number(env.DB_PG_RATE_BURST || Math.max(1, Math.ceil(rate))),
+              refillPerSecond: rate,
+            })
+          : null,
+      rules: this.mergeQueryRules(
+        PostgresDatabase.DEFAULT_QUERY_RULES,
+        this.QUERY_RULES,
+        config.queryRules ?? this.loadQueryRulesFile(env.DB_PG_QUERY_RULES)
+      ),
+    });
+  }
+
+  /** Combine rule sets; a later set overrides an earlier one's default and same patterns. */
+  static mergeQueryRules(...ruleSets) {
+    const merged = { default: undefined, queries: {} };
+    for (const rules of ruleSets.filter(Boolean)) {
+      if (rules.default) merged.default = rules.default;
+      merged.queries = { ...merged.queries, ...rules.queries };
+    }
+    return merged;
+  }
+
+  /** Read a rules JSON file named by DB_PG_QUERY_RULES (none → no rules). */
+  static loadQueryRulesFile(filePath) {
+    if (!filePath) return null;
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  }
+
+  /** The work class for a SQL text: by its query name through the rules, else the default. */
+  classify(text) {
+    return this.scheduler?.classify(PostgresDatabase.queryNames.get(text)) ?? null;
+  }
+
+  /** Run `work` through the scheduler in `cls` (directly when the scheduler is off). */
+  schedule(work, cls) {
+    return this.scheduler ? this.scheduler.run(work, { cls: cls ?? undefined }) : work();
   }
 
   /**
@@ -411,21 +480,32 @@ export class PostgresDatabase {
 
   /**
    * Run `work(client)` inside one transaction on a dedicated connection.
-   * Commits when it resolves; rolls back and rethrows when it throws.
+   * Commits when it resolves; rolls back and rethrows when it throws. Scheduled as one job
+   * (default class `interactive`, or `priority`), so a temporary failure (deadlock,
+   * serialization failure, dropped connection) reruns the whole transaction: `work` must
+   * be safe to run again. Inside `work`, use `client.query`, not this adapter's query().
    */
-  async withTransaction(work) {
+  withTransaction(work, { priority } = {}) {
+    return this.schedule(() => this.runTransaction(work), priority);
+  }
+
+  async runTransaction(work) {
     const queries = PostgresDatabase.transactionQueries;
     const client = await this.pool.connect();
+    let broken = null;
     try {
       await client.query(queries.begin_transaction);
       const result = await work(client);
       await client.query(queries.commit_transaction);
       return result;
     } catch (error) {
-      await client.query(queries.rollback_transaction);
+      // A failed rollback (e.g. the connection dropped) must not hide the original error.
+      await client.query(queries.rollback_transaction).catch((rollbackError) => {
+        broken = rollbackError;
+      });
       throw error;
     } finally {
-      client.release();
+      client.release(broken ?? undefined);
     }
   }
 
@@ -542,7 +622,15 @@ export class PostgresDatabase {
     return true;
   }
 
-  async query(text, params = []) {
+  /**
+   * Run one statement through the scheduler. Its class comes from the rules by query name
+   * (named queries only), or from `priority` ('critical' | 'interactive' | 'background').
+   */
+  query(text, params = [], { priority } = {}) {
+    return this.schedule(() => this.runQuery(text, params), priority ?? this.classify(text));
+  }
+
+  async runQuery(text, params) {
     const start = Date.now();
 
     try {
