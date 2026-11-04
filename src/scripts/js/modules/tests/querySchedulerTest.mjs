@@ -131,6 +131,23 @@ export class QuerySchedulerTest extends LocalDatabaseTest {
       waited instanceof QueryWaitTimeoutError
     );
 
+    let quickTries = 0;
+    const started = Date.now();
+    const quick = await this.constructor.errorOf(
+      new QueryScheduler({ retryBaseDelayMs: 50 }).run(
+        async () => {
+          quickTries += 1;
+          throw Object.assign(new Error('refused'), { code: 'ECONNREFUSED' });
+        },
+        { maxWaitMs: 300 }
+      )
+    );
+    this.check(
+      'a per-call maxWaitMs shortens the limit (fails fast)',
+      quick !== null && Date.now() - started < 1000 && quickTries > 1,
+      `${Date.now() - started} ms, ${quickTries} tries`
+    );
+
     const retrying = new QueryScheduler({ retryBaseDelayMs: 20 });
     let attempts = 0;
     const result = await retrying.run(async () => {

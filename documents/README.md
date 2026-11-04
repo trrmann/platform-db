@@ -65,7 +65,8 @@ the database). Schema bootstrap and `waitForConnection()` bypass it.
 - **Rules** map named queries (from `-- Query: name` sections) to classes. Precedence: this package's
   (`health_check`, `connection_probe`, `table_exists` are `critical`), then the adapter's `static QUERY_RULES`, then the
   `DB_PG_QUERY_RULES` file. An exact name beats a wildcard, and a longer wildcard beats a shorter one. A call can
-  override: `db.query(sql, params, { priority: 'background' })`, `db.withTransaction(work, { priority })`.
+  override: `db.query(sql, params, { priority: 'background' })`, `db.withTransaction(work, { priority })`, and shorten
+  the waiting limit with `{ maxWaitMs }` (callers with their own retry, like request-queue's store, use a short one).
 - **Retry:** temporary failures are retried with backoff (0.2 s doubling to 5 s) within the class's waiting limit:
   connection refused or dropped, `57P01`/`57P02`/`57P03` restarts, `53300` too many connections, `08xxx`
   connection errors, `40001`/`40P01` serialization and deadlock. Real errors (syntax, constraint) fail at once.

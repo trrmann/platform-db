@@ -138,10 +138,13 @@ export class QueryScheduler {
   }
 
   /**
-   * Queue `work` (an async function) in class `cls`; resolves with its result.
+   * Queue `work` (an async function) in class `cls`; resolves with its result. `maxWaitMs`
+   * shortens the class's waiting limit for this job (callers with their own retry, such as
+   * request-queue's store, use a short one so they fail fast).
    */
-  run(work, { cls = this.defaultClass } = {}) {
+  run(work, { cls = this.defaultClass, maxWaitMs } = {}) {
     const settings = this.classes[this.knownClass(cls)];
+    const limit = Math.min(settings.maxWaitMs, maxWaitMs ?? Infinity);
     return new Promise((resolve, reject) => {
       const now = Date.now();
       const job = {
@@ -149,7 +152,7 @@ export class QueryScheduler {
         cls,
         priority: settings.priority,
         enqueuedAt: now,
-        deadline: now + settings.maxWaitMs,
+        deadline: now + limit,
         notBefore: 0,
         attempts: 0,
         order: (this.sequence += 1),
@@ -157,7 +160,7 @@ export class QueryScheduler {
         reject,
         lastError: null,
       };
-      job.expiry = setTimeout(() => this.expire(job), settings.maxWaitMs);
+      job.expiry = setTimeout(() => this.expire(job), limit);
       this.pending.push(job);
       this.dispatch();
     });

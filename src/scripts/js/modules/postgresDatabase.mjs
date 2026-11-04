@@ -362,8 +362,8 @@ export class PostgresDatabase {
   }
 
   /** Run `work` through the scheduler in `cls` (directly when the scheduler is off). */
-  schedule(work, cls) {
-    return this.scheduler ? this.scheduler.run(work, { cls: cls ?? undefined }) : work();
+  schedule(work, cls, maxWaitMs) {
+    return this.scheduler ? this.scheduler.run(work, { cls: cls ?? undefined, maxWaitMs }) : work();
   }
 
   /**
@@ -485,8 +485,8 @@ export class PostgresDatabase {
    * serialization failure, dropped connection) reruns the whole transaction: `work` must
    * be safe to run again. Inside `work`, use `client.query`, not this adapter's query().
    */
-  withTransaction(work, { priority } = {}) {
-    return this.schedule(() => this.runTransaction(work), priority);
+  withTransaction(work, { priority, maxWaitMs } = {}) {
+    return this.schedule(() => this.runTransaction(work), priority, maxWaitMs);
   }
 
   async runTransaction(work) {
@@ -625,9 +625,14 @@ export class PostgresDatabase {
   /**
    * Run one statement through the scheduler. Its class comes from the rules by query name
    * (named queries only), or from `priority` ('critical' | 'interactive' | 'background').
+   * `maxWaitMs` shortens the class's waiting limit for this call.
    */
-  query(text, params = [], { priority } = {}) {
-    return this.schedule(() => this.runQuery(text, params), priority ?? this.classify(text));
+  query(text, params = [], { priority, maxWaitMs } = {}) {
+    return this.schedule(
+      () => this.runQuery(text, params),
+      priority ?? this.classify(text),
+      maxWaitMs
+    );
   }
 
   async runQuery(text, params) {
