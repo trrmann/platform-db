@@ -3,6 +3,12 @@
  * SQL file loading (whole files and named queries), schema bootstrap,
  * transactions, health checks, and the free-tier expiry warning.
  *
+ * Start-up resilience: waitForConnection() retries with backoff until the
+ * database answers (Render may start a service before its database, and free
+ * databases restart); schema bootstrap holds an advisory lock so services that
+ * start together never run their bootstraps at the same moment; and a dropped
+ * idle connection is logged and replaced by the pool instead of ending the process.
+ *
  * Subclasses set `static SCHEMA` (their PostgreSQL schema) and `static sqlRoot`
  * (their own SQL folder). The introspection and transaction queries always load
  * from this package's SQL folder.
@@ -14,6 +20,22 @@ import { fileURLToPath } from 'url';
 import pg from 'pg';
 import dotenv from 'dotenv';
 
+/**
+ * The database did not answer within the wait limit of waitForConnection().
+ */
+export class DatabaseUnavailableError extends Error {
+  /**
+   * @param {string} message
+   * @param {{attempts: number, waitedMs: number, cause?: Error}} details
+   */
+  constructor(message, { attempts, waitedMs, cause } = {}) {
+    super(message, { cause });
+    this.name = 'DatabaseUnavailableError';
+    this.attempts = attempts;
+    this.waitedMs = waitedMs;
+  }
+}
+
 export class PostgresDatabase {
   static Pool = pg.Pool;
   static filePath = fileURLToPath(import.meta.url);
@@ -24,6 +46,14 @@ export class PostgresDatabase {
   static DEFAULT_IDLE_TIMEOUT_MS = 30000;
   static DEFAULT_CONNECTION_TIMEOUT_MS = 2000;
   static DEFAULT_SSL = { rejectUnauthorized: false };
+
+  /** waitForConnection() defaults: total wait, first retry delay, longest retry delay. */
+  static DEFAULT_CONNECT_WAIT_MS = 120000;
+  static DEFAULT_RETRY_BASE_DELAY_MS = 500;
+  static DEFAULT_RETRY_MAX_DELAY_MS = 10000;
+
+  /** Advisory lock held while any schema file is bootstrapped (one at a time per database). */
+  static BOOTSTRAP_LOCK_KEY = 'platform-db:schema-bootstrap';
 
   /**
    * PostgreSQL schema owned by the adapter (null = server default). Subclasses
@@ -239,10 +269,106 @@ export class PostgresDatabase {
     this.config = resolvedConfig;
     this.pool = new this.constructor.Pool(resolvedConfig);
 
-    this.pool.on('error', (err) => {
-      console.error('Unexpected error on idle client', err);
-      process.exit(-1);
+    // An idle connection can drop when the database restarts. The pool discards it and opens a
+    // new one on the next query, so this is logged rather than ending the process.
+    this.pool.on('error', (error) => this.onIdleClientError(error));
+  }
+
+  /**
+   * Log an error raised by an idle pooled connection (the pool has already removed it).
+   */
+  onIdleClientError(error) {
+    console.error(`⚠️ Database connection dropped while idle (will reconnect): ${error.message}`);
+  }
+
+  /**
+   * Wait `ms` milliseconds. A method so tests can replace it.
+   */
+  static sleep(ms) {
+    return new Promise((resolve) => {
+      setTimeout(resolve, ms);
     });
+  }
+
+  /**
+   * Delay before retry number `attempt` (1-based): doubles from `baseDelayMs`, capped at `maxDelayMs`.
+   */
+  static retryDelay(attempt, baseDelayMs, maxDelayMs) {
+    return Math.min(maxDelayMs, baseDelayMs * 2 ** (attempt - 1));
+  }
+
+  /**
+   * Whether failure number `attempt` should be logged: the 1st, 2nd, 4th, 8th, … so a long
+   * outage doesn't flood the log.
+   */
+  static shouldLogAttempt(attempt) {
+    return Number.isInteger(Math.log2(attempt));
+  }
+
+  static #lockQueries = null;
+
+  static get lockQueries() {
+    // Same subclass-safe pattern as introspectionQueries.
+    if (!PostgresDatabase.#lockQueries) {
+      PostgresDatabase.#lockQueries = PostgresDatabase.loadNamedSqlStatements(
+        'pg/lock-queries.sql',
+        PostgresDatabase.sqlRoot
+      );
+    }
+    return PostgresDatabase.#lockQueries;
+  }
+
+  /**
+   * Try the connection once. Returns null on success, else the error (nothing is logged).
+   */
+  async probeConnection() {
+    let client = null;
+    try {
+      client = await this.pool.connect();
+      await client.query(this.constructor.introspectionQueries.connection_probe);
+      return null;
+    } catch (error) {
+      return error;
+    } finally {
+      // Always return the connection, or closing the pool waits forever.
+      client?.release();
+    }
+  }
+
+  /**
+   * Wait until the database answers, retrying with exponential backoff.
+   * Resolves with the number of attempts; throws DatabaseUnavailableError after `maxWaitMs`.
+   * @param {{maxWaitMs?: number, baseDelayMs?: number, maxDelayMs?: number}} [options]
+   */
+  async waitForConnection({
+    maxWaitMs = this.constructor.DEFAULT_CONNECT_WAIT_MS,
+    baseDelayMs = this.constructor.DEFAULT_RETRY_BASE_DELAY_MS,
+    maxDelayMs = this.constructor.DEFAULT_RETRY_MAX_DELAY_MS,
+  } = {}) {
+    const started = Date.now();
+    for (let attempt = 1; ; attempt += 1) {
+      const error = await this.probeConnection();
+      const waitedMs = Date.now() - started;
+      if (!error) {
+        const after = attempt > 1 ? ` after ${attempt} attempts (${waitedMs} ms)` : '';
+        console.log(`✅ Database connected: ${this.config.host}${after}`);
+        return attempt;
+      }
+      const delay = this.constructor.retryDelay(attempt, baseDelayMs, maxDelayMs);
+      if (waitedMs + delay > maxWaitMs) {
+        console.error(`❌ Database unavailable after ${attempt} attempts: ${error.message}`);
+        throw new DatabaseUnavailableError(
+          `Database ${this.config.host} did not answer within ${maxWaitMs} ms`,
+          { attempts: attempt, waitedMs, cause: error }
+        );
+      }
+      if (this.constructor.shouldLogAttempt(attempt)) {
+        console.warn(
+          `⏳ Database not reachable yet (attempt ${attempt}): ${error.message}. Retrying in ${delay} ms`
+        );
+      }
+      await this.constructor.sleep(delay);
+    }
   }
 
   static #introspectionQueries = null;
@@ -304,26 +430,34 @@ export class PostgresDatabase {
   }
 
   /**
+   * Short label for a schema statement in the bootstrap log.
+   */
+  static describeStatement(sql) {
+    const match = sql.match(
+      /(CREATE|INSERT)\s+(?:INTO\s+)?(TABLE|INDEX|EXTENSION)?(?:\s+IF\s+NOT\s+EXISTS)?\s*("?[\w-]+"?)/i
+    );
+    if (match) {
+      return `${match[1].toUpperCase()} ${match[2] ? match[2].toUpperCase() + ' ' : ''}${match[3]}`;
+    }
+    return sql.replace(/\s+/g, ' ').slice(0, 40);
+  }
+
+  /**
    * Run every statement in a schema SQL file (idempotent bootstrap),
    * logging progress per statement, then list the public tables.
    * Throws if any statement fails so bootstrap problems are never silent.
+   * Holds the bootstrap advisory lock for the whole file, so two processes never bootstrap
+   * at the same moment (concurrent CREATE ... IF NOT EXISTS can still collide in PostgreSQL).
    */
   async initializeSchemaFromFile(relativePath, bannerTitle) {
     const allSQL = this.constructor.loadSqlStatements(relativePath, this.constructor.sqlRoot);
-
-    const describeStatement = (sql) => {
-      const match = sql.match(
-        /(CREATE|INSERT)\s+(?:INTO\s+)?(TABLE|INDEX|EXTENSION)?(?:\s+IF\s+NOT\s+EXISTS)?\s*("?[\w-]+"?)/i
-      );
-      if (match) {
-        return `${match[1].toUpperCase()} ${match[2] ? match[2].toUpperCase() + ' ' : ''}${match[3]}`;
-      }
-      return sql.replace(/\s+/g, ' ').slice(0, 40);
-    };
+    const locks = PostgresDatabase.lockQueries;
+    const lockKey = this.constructor.BOOTSTRAP_LOCK_KEY;
 
     const client = await this.pool.connect();
 
     try {
+      await client.query(locks.acquire_advisory_lock, [lockKey]);
       console.log('╔════════════════════════════════════════════════╗');
       console.log(`║ ${bannerTitle.padEnd(46)} ║`);
       console.log('╚════════════════════════════════════════════════╝\n');
@@ -333,7 +467,7 @@ export class PostgresDatabase {
       const failures = [];
 
       for (let i = 0; i < allSQL.length; i += 1) {
-        const label = describeStatement(allSQL[i]);
+        const label = this.constructor.describeStatement(allSQL[i]);
         try {
           process.stdout.write(`[${i + 1}/${allSQL.length}] ${label}... `);
           await client.query(allSQL[i]);
@@ -359,24 +493,25 @@ export class PostgresDatabase {
       console.log('\n✅ Schema bootstrap complete!');
       return result.rows;
     } finally {
+      // The lock is session-level: release it before the connection goes back to the pool.
+      // If the connection itself died, PostgreSQL released the lock with the session.
+      await client.query(locks.release_advisory_lock, [lockKey]).catch(() => {});
       client.release();
     }
   }
 
+  /**
+   * Try the connection once and log the result. Returns true when connected.
+   * Start-up code should prefer waitForConnection(), which retries.
+   */
   async initializeDatabaseConnection() {
-    let client = null;
-    try {
-      client = await this.pool.connect();
-      await client.query(this.constructor.introspectionQueries.connection_probe);
-      console.log(`✅ Database connected: ${this.config.host}`);
-      return true;
-    } catch (error) {
+    const error = await this.probeConnection();
+    if (error) {
       console.error(`❌ Database connection failed: ${error.message}`);
       return false;
-    } finally {
-      // Always return the connection, or closing the pool waits forever.
-      client?.release();
     }
+    console.log(`✅ Database connected: ${this.config.host}`);
+    return true;
   }
 
   async query(text, params = []) {

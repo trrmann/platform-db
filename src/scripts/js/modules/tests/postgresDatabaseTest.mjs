@@ -1,14 +1,17 @@
 /**
  * PostgresDatabase test (platform-db): SQL splitting and named-query loading,
  * connection and health, schema bootstrap (including failure reporting),
- * table existence, transactions (commit and rollback), and the expiry warning.
+ * table existence, transactions (commit and rollback), the expiry warning, and start-up
+ * resilience (waiting for a database that comes up late, giving up after the limit,
+ * surviving a dropped idle connection, and the schema bootstrap lock).
  * Runs only against the local scratch database (local-db.sh).
  */
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PostgresDatabase } from '../postgresDatabase.mjs';
+import { PostgresDatabase, DatabaseUnavailableError } from '../postgresDatabase.mjs';
 import { LocalDatabaseTest } from '../localDatabaseTest.mjs';
+import { TcpRelay } from './tcpRelay.mjs';
 
 class FixtureDatabase extends PostgresDatabase {
   static sqlRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../sql/test');
@@ -54,7 +57,7 @@ export class PostgresDatabaseTest extends LocalDatabaseTest {
       statements.some((s) => s.includes("'semi;colon -- not a comment'"))
     );
     this.check('comments removed', !statements.some((s) => s.includes('block comment')));
-    this.check('named queries load', Object.keys(this.constructor.fixtures).length === 4);
+    this.check('named queries load', Object.keys(this.constructor.fixtures).length === 7);
     this.check(
       'duplicate query names rejected',
       this.constructor.throws(() => FixtureDatabase.loadNamedSqlStatements('fixture-duplicate.sql'))
@@ -158,6 +161,135 @@ export class PostgresDatabaseTest extends LocalDatabaseTest {
     }
   }
 
+  /**
+   * A second adapter on the same database with config overrides; closed with the test.
+   */
+  createAdapter(overrides) {
+    const adapter = new FixtureDatabase({ ...this.database.config, ...overrides });
+    this.databases.push(adapter);
+    return adapter;
+  }
+
+  /**
+   * Settle state of a promise without waiting for it: 'pending', 'resolved' or 'rejected'.
+   */
+  static async stateOf(promise) {
+    const marker = Symbol('pending');
+    try {
+      const value = await Promise.race([promise, Promise.resolve(marker)]);
+      return value === marker ? 'pending' : 'resolved';
+    } catch {
+      return 'rejected';
+    }
+  }
+
+  async checkWaitForConnection() {
+    console.log('\nStart-up: waiting for the database');
+    const fast = { baseDelayMs: 100, maxDelayMs: 300 };
+    this.check(
+      'reachable database: connected on the first attempt',
+      (await this.database.waitForConnection(fast)) === 1
+    );
+
+    const deadPort = await TcpRelay.freePort();
+    const unreachable = this.createAdapter({ port: deadPort, connectionTimeoutMillis: 500 });
+    let gaveUp = null;
+    const started = Date.now();
+    try {
+      await unreachable.waitForConnection({ ...fast, maxWaitMs: 1200 });
+    } catch (error) {
+      gaveUp = error;
+    }
+    this.check(
+      'unreachable database: gives up with DatabaseUnavailableError',
+      gaveUp instanceof DatabaseUnavailableError,
+      gaveUp?.message
+    );
+    this.check('… after retrying', gaveUp?.attempts > 1, String(gaveUp?.attempts));
+    this.check('… within the wait limit', Date.now() - started < 3000);
+
+    const latePort = await TcpRelay.freePort();
+    const relay = new TcpRelay({
+      targetHost: this.database.config.host,
+      targetPort: this.database.config.port,
+    });
+    const late = this.createAdapter({ port: latePort, connectionTimeoutMillis: 500 });
+    try {
+      const waiting = late.waitForConnection({ ...fast, maxWaitMs: 15000 });
+      await this.constructor.sleep(800);
+      this.check(
+        'database down at start: still waiting',
+        (await this.constructor.stateOf(waiting)) === 'pending'
+      );
+      await relay.start(latePort);
+      const attempts = await waiting;
+      this.check('database comes up: connects', attempts > 1, String(attempts));
+      this.check('… and queries work', (await late.healthCheck()).status === 'healthy');
+    } finally {
+      await late.close();
+      this.databases.splice(this.databases.indexOf(late), 1);
+      await relay.stop();
+    }
+  }
+
+  async checkIdleConnectionDrop() {
+    console.log('\nAn idle connection dropped by the server');
+    const q = this.constructor.fixtures;
+    const appName = 'platform_db_idle_drop_test';
+    const idle = this.createAdapter({ application_name: appName, idleTimeoutMillis: 60000 });
+    await idle.healthCheck(); // leaves one idle connection in the pool
+
+    const originalExit = process.exit;
+    let exitCalled = false;
+    process.exit = () => {
+      exitCalled = true;
+    };
+    try {
+      const { terminated } = (
+        await this.database.query(q.terminate_application_sessions, [appName])
+      ).rows[0];
+      this.check('server ended the idle connection', terminated === 1, String(terminated));
+      await this.constructor.sleep(300);
+      this.check('process keeps running', !exitCalled);
+    } finally {
+      process.exit = originalExit;
+    }
+    this.check(
+      'pool reconnects on the next query',
+      (await idle.healthCheck()).status === 'healthy'
+    );
+  }
+
+  async checkBootstrapLock() {
+    console.log('\nSchema bootstrap lock');
+    const q = this.constructor.fixtures;
+    const key = PostgresDatabase.BOOTSTRAP_LOCK_KEY;
+    const holder = await this.database.getClient();
+    const other = this.createAdapter({});
+    try {
+      await holder.query(PostgresDatabase.lockQueries.acquire_advisory_lock, [key]);
+      const bootstrap = other.initializeSchemaFromFile('fixture-schema.sql', 'Locked bootstrap');
+      bootstrap.catch(() => {});
+      await this.constructor.sleep(500);
+      this.check(
+        'bootstrap waits while another process holds the lock',
+        (await this.constructor.stateOf(bootstrap)) === 'pending'
+      );
+      await holder.query(q.release_advisory_lock, [key]);
+      await bootstrap;
+      this.check('bootstrap runs once the lock is free', true);
+      const { locked } = (await holder.query(q.try_advisory_lock, [key])).rows[0];
+      this.check('bootstrap released the lock afterwards', locked === true);
+      await holder.query(q.release_advisory_lock, [key]);
+    } finally {
+      holder.release();
+    }
+  }
+
+  static sleep(ms) {
+    return PostgresDatabase.sleep(ms);
+  }
+
   async run() {
     this.assertLocalTarget();
     console.log('PostgresDatabase test (local scratch database)\n');
@@ -165,6 +297,9 @@ export class PostgresDatabaseTest extends LocalDatabaseTest {
     await this.resetDatabase();
     await this.checkDatabase();
     this.checkExpiry();
+    await this.checkWaitForConnection();
+    await this.checkIdleConnectionDrop();
+    await this.checkBootstrapLock();
     await this.resetDatabase();
     return this.summary();
   }
