@@ -1,0 +1,16 @@
+{
+  "folders": [
+    {
+      "path": ".",
+    },
+  ],
+  "settings": {
+    // Put every script in src/scripts/sh on PATH for the VS Code terminal.
+    "terminal.integrated.env.linux": {
+      "PATH": "${workspaceFolder}/src/scripts/sh:${env:PATH}",
+    },
+    "terminal.integrated.env.osx": {
+      "PATH": "${workspaceFolder}/src/scripts/sh:${env:PATH}",
+    },
+  },
+}
