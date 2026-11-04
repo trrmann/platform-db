@@ -12,6 +12,12 @@
 
 ## resolved
 
+- **Backups shifted times by the machine's UTC offset (v0.2.5, 2026-11-04).** The driver reads `timestamp` (without
+  time zone) columns as local time into Date objects. JSON writes those as UTC (`…Z`), and PostgreSQL ignores the zone
+  on such a column. So any backup that passed through a file or HTTP came back shifted by the machine's offset from
+  UTC (not on Render, which runs in UTC; yes on a laptop). Found by FlashCards' round trip over HTTP. `TableBackup` now
+  exports `timestamp` and `date` columns as clock-time text. **Resolved:** `npm run test:backup` 11/11, including a
+  trip through JSON at UTC+14 with `timestamp`, `date` and `timestamptz` all unchanged.
 - **`TableBackup`: shared backup and restore of tables (v0.2.4, 2026-11-04).** Phase 3d needs the IAM service and
   FlashCards to back up their own tables. The generic part moves here from FlashCards' backup service: export, upsert
   import, natural keys, id remapping, serial realignment. **Fixed on the way:** the import put the keys of the backup

@@ -86,6 +86,8 @@ transaction, in the given order. Importing the same data twice changes nothing.
 - Natural-key tables (for example roles matched by name) are matched on that key, and their backup ids are rewritten
   in later tables.
 - `TableBackup.remapColumns(data, columns, map)` rewrites ids (for example merged user accounts) before importing.
+- **Times survive JSON:** `timestamp` (without time zone) and `date` columns are exported as clock-time text, so a
+  backup that went through a file or HTTP restores them exactly on a machine in any time zone.
 - **Only columns that exist in the table are written.** Any other key in a backup row is skipped with a warning, so
   names from a file never reach the SQL, and backups made before a column was dropped still restore.
 

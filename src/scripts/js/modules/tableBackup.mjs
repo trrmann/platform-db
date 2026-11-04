@@ -10,6 +10,10 @@
  *   backup row is skipped with a warning. Names from a file never reach the SQL (CODING_STANDARDS
  *   0.1), and backups made before a column was dropped still restore.
  * - Serial primary keys are realigned after an import so new rows don't collide.
+ * - Columns without a time zone (`timestamp`, `date`) are exported as plain clock-time text.
+ *   The driver reads them as local time into Date objects, and JSON would turn those into UTC
+ *   (`…Z`), which PostgreSQL then ignores on such a column, shifting every value by the machine's
+ *   UTC offset whenever a backup passed through a file or HTTP.
  * The caller provides the transaction (withTransaction) and the table order (references first).
  */
 
@@ -22,6 +26,25 @@ export class TableBackup {
   );
 
   static IDENTIFIER = /^[a-z_][a-z0-9_]*$/;
+
+  /** Column types exported as plain text (see the class comment). */
+  static ZONELESS_TYPES = new Set(['timestamp without time zone', 'date']);
+
+  static pad(value, size = 2) {
+    return String(value).padStart(size, '0');
+  }
+
+  /**
+   * A Date read from a zoneless column, as the clock-time text PostgreSQL stored
+   * (`YYYY-MM-DD HH:MM:SS.mmm`, or `YYYY-MM-DD` for a date). Other values are returned as is.
+   */
+  static clockText(value, dataType) {
+    if (!(value instanceof Date)) return value;
+    const p = TableBackup.pad;
+    const day = `${value.getFullYear()}-${p(value.getMonth() + 1)}-${p(value.getDate())}`;
+    if (dataType === 'date') return day;
+    return `${day} ${p(value.getHours())}:${p(value.getMinutes())}:${p(value.getSeconds())}.${p(value.getMilliseconds(), 3)}`;
+  }
 
   /**
    * @param {object} options
@@ -97,7 +120,7 @@ export class TableBackup {
     for (const table of this.tables) {
       const columns = await this.columnsOf(this.database, table, this.work);
       out.schema[table] = { columns, exists: columns.length > 0 };
-      out.data[table] = columns.length
+      const rows = columns.length
         ? (
             await this.database.query(
               TableBackup.queries.select_all_rows_template.replace(
@@ -109,6 +132,13 @@ export class TableBackup {
             )
           ).rows
         : [];
+      const zoneless = columns.filter((column) => TableBackup.ZONELESS_TYPES.has(column.data_type));
+      for (const row of rows) {
+        for (const { column_name: name, data_type: type } of zoneless) {
+          row[name] = TableBackup.clockText(row[name], type);
+        }
+      }
+      out.data[table] = rows;
     }
     return out;
   }

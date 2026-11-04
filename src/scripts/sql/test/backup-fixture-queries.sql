@@ -18,8 +18,15 @@ CREATE TABLE platform_backup_test.things (
   thing_id SERIAL PRIMARY KEY,
   kind_id UUID REFERENCES platform_backup_test.kinds(kind_id),
   owner_id UUID,
-  name TEXT NOT NULL
+  name TEXT NOT NULL,
+  seen_at TIMESTAMP NOT NULL DEFAULT '2026-11-04 08:30:15.250',
+  due_on DATE NOT NULL DEFAULT '2026-11-05',
+  stamped_at TIMESTAMPTZ NOT NULL DEFAULT '2026-11-04 08:30:15.250+00'
 );
+
+-- Query: backup_times
+SELECT name, seen_at::text AS seen_at, due_on::text AS due_on, stamped_at = '2026-11-04 08:30:15.250+00' AS stamped_ok
+FROM platform_backup_test.things ORDER BY thing_id;
 
 -- Query: backup_create_no_key
 CREATE TABLE platform_backup_test.no_key (value TEXT);

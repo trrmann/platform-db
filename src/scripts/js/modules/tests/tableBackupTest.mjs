@@ -52,6 +52,42 @@ export class TableBackupTest extends LocalDatabaseTest {
     return (await this.database.query(this.constructor.fixtures.backup_things_with_codes)).rows;
   }
 
+  /**
+   * A backup that went through JSON (a file, HTTP) restores times exactly, even on a machine far
+   * from UTC: zoneless timestamps and dates are exported as clock-time text.
+   */
+  async checkTimesThroughJson(exported) {
+    const q = this.constructor.fixtures;
+    const zone = process.env.TZ;
+    process.env.TZ = 'Pacific/Kiritimati'; // UTC+14: any shift would show
+    try {
+      const fresh = await this.backup.exportTables();
+      const viaJson = JSON.parse(JSON.stringify(fresh.data));
+      this.check(
+        'zoneless times are exported as clock-time text',
+        viaJson.things[0].seen_at === '2026-11-04 08:30:15.250' &&
+          viaJson.things[0].due_on === '2026-11-05'
+      );
+      await this.createSchema();
+      await this.importAll(viaJson);
+      const times = (await this.database.query(q.backup_times)).rows;
+      this.check(
+        'after a trip through JSON at UTC+14, timestamp, date and timestamptz are unchanged',
+        times.length === exported.data.things.length &&
+          times.every(
+            (row) =>
+              row.seen_at === '2026-11-04 08:30:15.25' &&
+              row.due_on === '2026-11-05' &&
+              row.stamped_ok
+          ),
+        JSON.stringify(times)
+      );
+    } finally {
+      if (zone === undefined) delete process.env.TZ;
+      else process.env.TZ = zone;
+    }
+  }
+
   async run() {
     this.assertLocalTarget();
     console.log('TableBackup test (local scratch database)\n');
@@ -111,6 +147,8 @@ export class TableBackupTest extends LocalDatabaseTest {
           results.warnings.filter((w) => w.startsWith('Ignored column things.')).length === 2,
         results.warnings.join(' | ')
       );
+
+      await this.checkTimesThroughJson(exported);
 
       await this.importAll(structuredClone(data));
       this.check(
