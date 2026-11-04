@@ -23,6 +23,11 @@ export class AppDatabase extends PostgresDatabase {
 
 Configuration comes from `DB_PG_*` environment variables (see `src/scripts/js/modules/postgresDatabase.mjs`).
 
+**Read-only mode:** `DB_PG_READ_ONLY=true` (or `readOnly: true` in the config) makes every session read-only
+(`default_transaction_read_only=on`). PostgreSQL then refuses any write (error `25006`), and `initializeSchemaFromFile()`
+refuses to run. Use it to point a local server at production for read-only checks. The flag is added to whatever
+`options` the config has, so copying another adapter's settings and setting `readOnly` is safe.
+
 ## Start-up and outages
 
 Render has no start order between services, and free databases sleep and restart, so every service must cope with
@@ -46,7 +51,12 @@ a database that isn't there yet or drops out:
 `~/.local/share/platform-db`) shared by every project; each project gets its own database named after its
 `package.json` name (`flashcards_local`, `iam_service_local`, `platform_db_local`, …). Projects call it through a
 thin wrapper in their own `src/scripts/sh/local-db.sh`. Commands: `init`, `start`, `stop`, `status`, `psql`, `env`,
-`run CMD…`, `serve`, `reset`, `drop`, `load-prod` (owner only: copies real user data), `destroy`.
+`run CMD…`, `serve`, `reset`, `drop`, `load-prod`, `destroy`. Set `LOCAL_DB_NAME` to work on another database of the
+cluster (for example an app's dev copy, kept apart from the database its tests wipe).
+
+`load-prod` copies production (real user data; owner use) into the project's local database. It dumps production
+first, read-only, so a failed dump leaves the local database untouched. It then drops and recreates the local
+database (a clean start, nothing left over), restores the dump with `--exit-on-error`, and deletes the dump file.
 
 ## Tests
 

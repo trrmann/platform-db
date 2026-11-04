@@ -66,10 +66,33 @@ export class PostgresDatabase {
     return dotenv.config();
   }
 
+  /**
+   * PostgreSQL connection options: the adapter's search_path, plus a read-only default for
+   * every transaction when `readOnly` is set (PostgreSQL then refuses any write, error 25006).
+   */
+  static connectionOptions(baseOptions, readOnly) {
+    const options = [];
+    const base = baseOptions ?? (this.SCHEMA ? `-c search_path=${this.SCHEMA},public` : undefined);
+    if (base) options.push(base);
+    if (readOnly && !base?.includes(this.READ_ONLY_OPTION)) options.push(this.READ_ONLY_OPTION);
+    return options.length > 0 ? options.join(' ') : undefined;
+  }
+
+  static READ_ONLY_OPTION = '-c default_transaction_read_only=on';
+
+  /**
+   * Pool configuration from explicit settings, else DB_PG_* environment variables.
+   * DB_PG_READ_ONLY=true (or `readOnly: true`) makes every session read-only: used to point a
+   * local server at production safely (no writes, no schema bootstrap).
+   */
   static createConfig(config = {}) {
     const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER;
+    const readOnly = config.readOnly ?? process.env.DB_PG_READ_ONLY === 'true';
 
+    // Explicit settings first; the computed fields below use them when given, so a key that is
+    // present but undefined still gets its default, and readOnly always reaches the options.
     return {
+      ...config,
       host:
         config.host ??
         (isProduction
@@ -84,8 +107,8 @@ export class PostgresDatabase {
       max: config.max ?? this.DEFAULT_POOL_MAX,
       idleTimeoutMillis: config.idleTimeoutMillis ?? this.DEFAULT_IDLE_TIMEOUT_MS,
       connectionTimeoutMillis: config.connectionTimeoutMillis ?? this.DEFAULT_CONNECTION_TIMEOUT_MS,
-      options: config.options ?? (this.SCHEMA ? `-c search_path=${this.SCHEMA},public` : undefined),
-      ...config,
+      options: this.connectionOptions(config.options, readOnly),
+      readOnly,
     };
   }
 
@@ -450,6 +473,11 @@ export class PostgresDatabase {
    * at the same moment (concurrent CREATE ... IF NOT EXISTS can still collide in PostgreSQL).
    */
   async initializeSchemaFromFile(relativePath, bannerTitle) {
+    if (this.config.readOnly) {
+      throw new Error(
+        `Schema bootstrap of ${relativePath} refused: the connection is read-only (DB_PG_READ_ONLY)`
+      );
+    }
     const allSQL = this.constructor.loadSqlStatements(relativePath, this.constructor.sqlRoot);
     const locks = PostgresDatabase.lockQueries;
     const lockKey = this.constructor.BOOTSTRAP_LOCK_KEY;

@@ -25,7 +25,8 @@
 #   serve      Run `npm run dev` against this database (PORT_DEV default 5001)
 #   reset      Drop and recreate this project's database (empty)
 #   drop       Drop this project's database
-#   load-prod  Replace this database with a read-only pg_dump of the Render DB
+#   load-prod  Replace this database (dropped and recreated first) with a read-only
+#              pg_dump of the Render DB; the dump file is deleted after the restore
 #              (copies real users' data: owner use only)
 #   destroy    Stop the cluster and delete it with every project's database
 ################################################################################
@@ -218,7 +219,9 @@ cmd_load_prod() {
     cmd_reset
     PGPASSWORD="${APP_PASSWORD}" pg_restore -h 127.0.0.1 -p "${PORT}" -U "${APP_USER}" \
         -d "$(project_database)" --no-owner --no-privileges --exit-on-error "${DUMP_FILE}"
-    echo "Loaded Render snapshot into $(project_database) (dump kept at ${DUMP_FILE})"
+    # The dump is a second copy of real user data; the restored database is all that's needed.
+    rm -f -- "${DUMP_FILE}"
+    echo "Loaded Render snapshot into $(project_database) (dump file removed)"
 }
 
 cmd_destroy() {

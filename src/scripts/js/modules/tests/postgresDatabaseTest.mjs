@@ -286,6 +286,56 @@ export class PostgresDatabaseTest extends LocalDatabaseTest {
     }
   }
 
+  async checkReadOnly() {
+    console.log('\nRead-only connections (DB_PG_READ_ONLY)');
+    const q = this.constructor.fixtures;
+    // Copies the main adapter's settings, as tools do, then asks for read-only.
+    const readOnly = this.createAdapter({ readOnly: true });
+    this.check('readOnly is recorded in the config', readOnly.config.readOnly === true);
+    this.check('reads work', (await readOnly.query(q.count_items)).rows[0].count >= 0);
+    let writeError = null;
+    try {
+      await readOnly.query(q.insert_item, ['must not be written']);
+    } catch (error) {
+      writeError = error;
+    }
+    this.check(
+      'writes are refused by PostgreSQL (25006)',
+      writeError?.code === '25006',
+      writeError?.code
+    );
+    this.check(
+      '… and nothing was written',
+      (await this.database.query(q.count_label, ['must not be written'])).rows[0].count === 0
+    );
+    let bootstrapError = null;
+    try {
+      await readOnly.initializeSchemaFromFile('fixture-schema.sql', 'Read-only bootstrap');
+    } catch (error) {
+      bootstrapError = error;
+    }
+    this.check('schema bootstrap is refused', /read-only/.test(bootstrapError?.message || ''));
+
+    const previous = process.env.DB_PG_READ_ONLY;
+    process.env.DB_PG_READ_ONLY = 'true';
+    try {
+      const fromEnv = FixtureDatabase.createConfig({});
+      this.check(
+        'DB_PG_READ_ONLY=true turns it on',
+        fromEnv.readOnly === true && fromEnv.options.includes(PostgresDatabase.READ_ONLY_OPTION)
+      );
+      const schemaOptions = PostgresDatabase.connectionOptions('-c search_path=iam,public', true);
+      this.check(
+        'search_path and read-only combine',
+        schemaOptions === `-c search_path=iam,public ${PostgresDatabase.READ_ONLY_OPTION}`
+      );
+    } finally {
+      if (previous === undefined) delete process.env.DB_PG_READ_ONLY;
+      else process.env.DB_PG_READ_ONLY = previous;
+    }
+    this.check('off by default', this.database.config.readOnly === false);
+  }
+
   static sleep(ms) {
     return PostgresDatabase.sleep(ms);
   }
@@ -300,6 +350,7 @@ export class PostgresDatabaseTest extends LocalDatabaseTest {
     await this.checkWaitForConnection();
     await this.checkIdleConnectionDrop();
     await this.checkBootstrapLock();
+    await this.checkReadOnly();
     await this.resetDatabase();
     return this.summary();
   }
