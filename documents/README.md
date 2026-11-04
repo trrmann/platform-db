@@ -8,6 +8,7 @@ It is a **library**, not a service: each application uses it in-process against 
 | `PostgresDatabase`         | Base adapter: pool, `static SCHEMA` (connection `search_path`), `static sqlRoot`, SQL file and named-query loading, `waitForConnection`, `initializeSchemaFromFile`, `withTransaction`, `tableExists`, `healthCheck`, `DB_PG_EXPIRE` warning |
 | `DatabaseUnavailableError` | Thrown by `waitForConnection()` when the database didn't answer within the wait limit (`attempts`, `waitedMs`, `cause`)                                                                                                                      |
 | `LocalDatabaseTest`        | Base class for tests on a local scratch database: local-only guard, checks, summary, pool cleanup                                                                                                                                            |
+| `DatabaseTargetGuard`      | `DatabaseTargetGuard.assert(env, config)`: a development or preview server may use only a local or read-only database (override `DB_PG_ALLOW_REMOTE_WRITES=true`). Call it before anything touches the database                              |
 | `TcpRelay`                 | Test tooling: forwards a local port to the scratch database. Start it late to simulate a database that comes up after the service; stop it to simulate an outage                                                                             |
 
 ## Using it

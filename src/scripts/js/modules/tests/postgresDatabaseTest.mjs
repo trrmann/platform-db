@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { PostgresDatabase, DatabaseUnavailableError } from '../postgresDatabase.mjs';
 import { LocalDatabaseTest } from '../localDatabaseTest.mjs';
 import { TcpRelay } from '../tcpRelay.mjs';
+import { DatabaseTargetGuard } from '../databaseTargetGuard.mjs';
 
 class FixtureDatabase extends PostgresDatabase {
   static sqlRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../sql/test');
@@ -336,6 +337,31 @@ export class PostgresDatabaseTest extends LocalDatabaseTest {
     this.check('off by default', this.database.config.readOnly === false);
   }
 
+  checkTargetGuard() {
+    console.log('\nDatabase target guard (development / preview)');
+    const remote = { host: 'dpg-example.virginia-postgres.render.com', readOnly: false };
+    const refused = (env, config, processEnv = {}) => {
+      try {
+        DatabaseTargetGuard.assert(env, config, processEnv);
+        return false;
+      } catch (error) {
+        return /Refusing to start/.test(error.message);
+      }
+    };
+    this.check(
+      'development on a writable remote database is refused',
+      refused('development', remote)
+    );
+    this.check('preview on a writable remote database is refused', refused('preview', remote));
+    this.check('remote read-only is allowed', !refused('preview', { ...remote, readOnly: true }));
+    this.check('local database is allowed', !refused('development', { host: '127.0.0.1' }));
+    this.check(
+      'DB_PG_ALLOW_REMOTE_WRITES=true overrides',
+      !refused('development', remote, { DB_PG_ALLOW_REMOTE_WRITES: 'true' })
+    );
+    this.check('production is not restricted', !refused('production', remote));
+  }
+
   static sleep(ms) {
     return PostgresDatabase.sleep(ms);
   }
@@ -351,6 +377,7 @@ export class PostgresDatabaseTest extends LocalDatabaseTest {
     await this.checkIdleConnectionDrop();
     await this.checkBootstrapLock();
     await this.checkReadOnly();
+    this.checkTargetGuard();
     await this.resetDatabase();
     return this.summary();
   }
