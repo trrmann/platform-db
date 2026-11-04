@@ -12,6 +12,10 @@
 
 ## resolved
 
+- **Local app user mirrors Render's admin login (v0.2.2, 2026-11-04).** `CREATEROLE` (not superuser), set at `init`
+  and on `start` for existing clusters, so iam-service's `iam-provision` (per-app logins) is tested locally under the
+  same rights it has on Render (checked there: `app_admin` can create roles, is not a superuser). **Resolved:**
+  `local-db.sh start` on the existing cluster set it; iam-service `npm run test:provision` 24/24.
 - **Queued, throttled and prioritised database work (v0.2.0, 2026-11-04, owner request).** `QueryScheduler`
   (concurrency = pool size, optional rate, classes with waiting limits, ageing, rules by query name, retry of temporary
   failures, transactions retried whole); `DB_PG_POOL_MAX`; `TokenBucket` moved here from request-queue. **Resolved:**

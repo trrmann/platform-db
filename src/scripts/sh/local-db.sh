@@ -112,7 +112,7 @@ unix_socket_directories = '${SOCKET_DIR}'
 EOF
     cmd_start
     load_credentials
-    super_psql -c "CREATE ROLE ${APP_USER} LOGIN PASSWORD '${APP_PASSWORD}';"
+    super_psql -c "CREATE ROLE ${APP_USER} LOGIN CREATEROLE PASSWORD '${APP_PASSWORD}';"
     echo "Initialized cluster at ${PGDATA_DIR} (port ${PORT})"
 }
 
@@ -130,11 +130,28 @@ cmd_init() {
     fi
 }
 
+# The app user mirrors the Render database's default login: not a superuser, but it may
+# create roles (CREATEROLE), so per-app login provisioning (iam-provision) can be tested
+# locally. Clusters made before this rule get the right on their next start.
+ensure_app_rights() {
+    [ -f "${CREDENTIALS_FILE}" ] || return 0
+    load_credentials
+    super_psql -c "DO \$\$ BEGIN
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_USER}' AND NOT rolcreaterole) THEN
+            ALTER ROLE ${APP_USER} CREATEROLE;
+        END IF;
+    END \$\$;"
+}
+
 cmd_start() {
     [ -d "${PGDATA_DIR}" ] || die "not initialized; run: local-db.sh init"
-    is_running && { echo "running on 127.0.0.1:${PORT}"; return 0; }
-    pg_ctl -D "${PGDATA_DIR}" -l "${LOG_FILE}" -w start > /dev/null
-    echo "started on 127.0.0.1:${PORT}"
+    if is_running; then
+        echo "running on 127.0.0.1:${PORT}"
+    else
+        pg_ctl -D "${PGDATA_DIR}" -l "${LOG_FILE}" -w start > /dev/null
+        echo "started on 127.0.0.1:${PORT}"
+    fi
+    ensure_app_rights
 }
 
 cmd_stop() {

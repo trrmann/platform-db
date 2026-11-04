@@ -79,7 +79,9 @@ the database). Schema bootstrap and `waitForConnection()` bypass it.
 
 `src/scripts/sh/local-db.sh` runs one private PostgreSQL cluster (127.0.0.1:5433, data in
 `~/.local/share/platform-db`) shared by every project; each project gets its own database named after its
-`package.json` name (`flashcards_local`, `iam_service_local`, `platform_db_local`, …). Projects call it through a
+`package.json` name (`flashcards_local`, `iam_service_local`, `platform_db_local`, …). Its app user mirrors the
+Render database's default login: not a superuser, but allowed to create roles (`CREATEROLE`), so iam-service's
+per-app login provisioning can be tested locally. Clusters made earlier get the right on their next `start`. Projects call it through a
 thin wrapper in their own `src/scripts/sh/local-db.sh`. Commands: `init`, `start`, `stop`, `status`, `psql`, `env`,
 `run CMD…`, `serve`, `reset`, `drop`, `load-prod`, `destroy`. Set `LOCAL_DB_NAME` to work on another database of the
 cluster (for example an app's dev copy, kept apart from the database its tests wipe).
