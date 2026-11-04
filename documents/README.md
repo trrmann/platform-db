@@ -10,6 +10,7 @@ It is a **library**, not a service: each application uses it in-process against 
 | `LocalDatabaseTest`                       | Base class for tests on a local scratch database: local-only guard, checks, summary, pool cleanup                                                                                                                                            |
 | `DatabaseTargetGuard`                     | `DatabaseTargetGuard.assert(env, config)`: a development or preview server may use only a local or read-only database (override `DB_PG_ALLOW_REMOTE_WRITES=true`). Call it before anything touches the database                              |
 | `QueryScheduler`, `QueryWaitTimeoutError` | Queues, throttles and prioritises database work (see "Queued database work")                                                                                                                                                                 |
+| `TableBackup`                             | Export a fixed set of tables and import them back with upsert semantics: natural-key tables, id remapping, serial realignment; only catalog columns are written (see "Backups")                                                              |
 | `TokenBucket`                             | Rate limiter (burst + refill per second), shared with request-queue                                                                                                                                                                          |
 | `TcpRelay`                                | Test tooling: forwards a local port to the scratch database. Start it late to simulate a database that comes up after the service; stop it to simulate an outage                                                                             |
 
@@ -75,6 +76,20 @@ the database). Schema bootstrap and `waitForConnection()` bypass it.
   `client.query`. Calling the adapter's `query()` from inside takes a second slot.
 - A job still queued at its waiting limit fails with `QueryWaitTimeoutError` (`cause`: the last error). A running job
   is never interrupted.
+
+## Backups (`TableBackup`)
+
+Each service backs up its own tables with a `TableBackup({ database, tables, naturalKeyTables, serialPkTables })`:
+`exportTables()` returns `{ schema, data }`, and `importTables(client, data, results)` upserts them inside the caller's
+transaction, in the given order. Importing the same data twice changes nothing.
+
+- Natural-key tables (for example roles matched by name) are matched on that key, and their backup ids are rewritten
+  in later tables.
+- `TableBackup.remapColumns(data, columns, map)` rewrites ids (for example merged user accounts) before importing.
+- **Only columns that exist in the table are written.** Any other key in a backup row is skipped with a warning, so
+  names from a file never reach the SQL, and backups made before a column was dropped still restore.
+
+Tested by `npm run test:backup`.
 
 ## Local scratch database
 

@@ -1,6 +1,6 @@
 {
   "name": "platform-db",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "description": "Shared PostgreSQL layer: adapter base class, SQL file loading, transactions, local scratch database tooling",
   "license": "ISC",
@@ -12,14 +12,15 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "npm run test:database && npm run test:scheduler",
+    "test": "npm run test:database && npm run test:scheduler && npm run test:backup",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "verify": "npm run format && npm run lint",
     "test:scheduler": "src/scripts/sh/local-db.sh run node src/scripts/js/modules/tests/query-scheduler-test.mjs",
-    "test:database": "src/scripts/sh/local-db.sh run node src/scripts/js/modules/tests/postgres-database-test.mjs"
+    "test:database": "src/scripts/sh/local-db.sh run node src/scripts/js/modules/tests/postgres-database-test.mjs",
+    "test:backup": "src/scripts/sh/local-db.sh run node src/scripts/js/modules/tests/table-backup-test.mjs"
   },
   "dependencies": {
     "dotenv": "^18.0.9",

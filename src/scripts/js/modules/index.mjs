@@ -5,3 +5,4 @@ export { TcpRelay } from './tcpRelay.mjs';
 export { DatabaseTargetGuard } from './databaseTargetGuard.mjs';
 export { QueryScheduler, QueryWaitTimeoutError } from './queryScheduler.mjs';
 export { TokenBucket } from './tokenBucket.mjs';
+export { TableBackup } from './tableBackup.mjs';

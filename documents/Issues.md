@@ -12,6 +12,12 @@
 
 ## resolved
 
+- **`TableBackup`: shared backup and restore of tables (v0.2.4, 2026-11-04).** Phase 3d needs the IAM service and
+  FlashCards to back up their own tables. The generic part moves here from FlashCards' backup service: export, upsert
+  import, natural keys, id remapping, serial realignment. **Fixed on the way:** the import put the keys of the backup
+  file's rows into the SQL as column names unchecked, so a crafted file could inject SQL (admin-only, but against
+  CODING_STANDARDS 0.1). Only catalog columns are written now; other keys are skipped with a warning. **Resolved:**
+  `npm run test:backup` 9/9, including an injection attempt that is skipped; `npm test` 56/56 and 21/21.
 - **Quieter query log in production (v0.2.3, 2026-11-04).** Every query was logged (`Executed query …`), so in
   production Render's health checks alone added a line every few seconds. `DB_PG_LOG_QUERIES` = `all` | `slow` | `off`;
   the default is `slow` in production (or on Render) and `all` elsewhere; `slow` logs queries taking at least
