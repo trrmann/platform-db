@@ -100,10 +100,12 @@ Run all three stages with `deploy.sh` (`src/scripts/sh/deploy.sh`). Each stage h
 - **Render is the production destination and the final verification point.** Code is production-ready
   only once it is deployed on Render and verified there (health, every page, read-only API checks).
 - Preview must pass before anything is deployed to production.
-- **All three environments use the same database** (Render PostgreSQL). See 0.7 for what that means for testing and data safety.
-- **Approved exception:** schema and migration work is developed and tested first on the local scratch
-  database (`local-db.sh`, [LOCAL_DATABASE.md](./LOCAL_DATABASE.md)). Work in progress that changes the schema
-  is never run with `deploy.sh -dev`/`-preview` until it is approved for the shared database.
+- **Databases (owner decision, 2026-11-04):** dev and preview run on a local database (`<project>_dev_local`; an
+  application refreshes it from production with its `pull-prod.sh`). `deploy.sh -preview --remote` opens production
+  **read-only** (`DB_PG_READ_ONLY=true`: PostgreSQL refuses writes, no schema bootstrap). Test suites use
+  `<project>_local`, which they drop and rebuild. **Only Render writes to production.** Servers enforce this with
+  platform-db's `DatabaseTargetGuard`: in development and preview they refuse a writable remote database (override
+  `DB_PG_ALLOW_REMOTE_WRITES=true`, deliberate owner use only). Schema changes reach production only through a release.
 
 ### 0.6 Preview testing: every page, every API
 
@@ -127,8 +129,8 @@ practice → answer → box change, export/import round trips, and backup/restor
 
 - Test code follows 0.3. It's built from classes, e.g. a suite runner, an HTTP/API client that holds the
   session, and one test class per area. Test code lives in `src/scripts/js/modules/tests/`.
-- Because the database is shared with production (0.5), tests must use **dedicated test accounts and
-  test data**, must never modify or delete real users' data, and must remove everything they create.
+- Tests that write run only on local databases (0.5). Tests that run against production (`preview --remote`) are
+  read-only and signed-out, and must never need to write.
 
 ### 0.7 Data safety: the database is reset every month
 
