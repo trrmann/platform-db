@@ -11,7 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PostgresDatabase, DatabaseUnavailableError } from '../postgresDatabase.mjs';
 import { LocalDatabaseTest } from '../localDatabaseTest.mjs';
-import { TcpRelay } from './tcpRelay.mjs';
+import { TcpRelay } from '../tcpRelay.mjs';
 
 class FixtureDatabase extends PostgresDatabase {
   static sqlRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../sql/test');

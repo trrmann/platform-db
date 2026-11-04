@@ -1,7 +1,8 @@
 /**
- * TCP relay for start-up tests: listens on a local port and forwards every connection to a
- * target (the local scratch database). Starting it late simulates a database that comes up
- * after the service; stopping it simulates the database going away.
+ * TCP relay for start-up tests (test tooling, exported like LocalDatabaseTest): listens on a
+ * local port and forwards every connection to a target (the local scratch database). Starting
+ * it late simulates a database that comes up after the service; stopping it simulates the
+ * database going away.
  */
 
 import net from 'node:net';
